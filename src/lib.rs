@@ -1,13 +1,11 @@
-#![allow(bad_style)]
-
-//! Provides a proc-macro for making utf-16 literals.
+//! Provides a macro for making utf-16 literals.
 //!
 //! ```rust
 //! use utf16_lit::{utf16, utf16_null};
 //!
-//! const EXAMPLE: &[u16] = utf16!("example");
+//! const EXAMPLE: &[u16] = &utf16!("example");
 //!
-//! const EXAMPLE_NULL: &[u16] = utf16_null!("example");
+//! const EXAMPLE_NULL: &[u16] = &utf16_null!("example");
 //!
 //! fn main() {
 //!   let v: Vec<u16> = "example".encode_utf16().collect();
@@ -23,204 +21,121 @@
 //! }
 //! ```
 
-extern crate proc_macro;
-use proc_macro::{TokenStream, TokenTree};
+#[doc(hidden)]
+pub const fn always_true() -> bool {
+  true
+}
 
-use core::str::FromStr;
+#[doc(hidden)]
+#[macro_export]
+macro_rules! length {
+  ($arg:expr) => {{
+    const fn wide_len(s: &str) -> usize {
+      let s = s.as_bytes();
+      let mut length: usize = 0;
+      let mut index: usize = 0;
+      while index < s.len() {
+        let mut chr = 0;
+        if s[index] & 0x80 == 0x00 {
+          chr = s[index] as u32;
+          index += 1;
+        } else if s[index] & 0xe0 == 0xc0 {
+          chr = (s[index] as u32 & 0x1f) << 6 | (s[index + 1] as u32 & 0x3f);
+          index += 2;
+        } else if s[index] & 0xf0 == 0xe0 {
+          chr = (s[index] as u32 & 0x0f) << 12
+            | (s[index + 1] as u32 & 0x3f) << 6
+            | (s[index + 2] as u32 & 0x3f);
+          index += 3;
+        } else if s[index] & 0xf8 == 0xf0 {
+          chr = (s[index] as u32 & 0x07) << 18
+            | (s[index + 1] as u32 & 0x3f) << 12
+            | (s[index + 2] as u32 & 0x3f) << 6
+            | (s[index + 3] as u32 & 0x3f);
+          index += 4;
+        } else {
+          ["Invalid literal provided."][($crate::always_true() as usize)];
+        };
+        length += [1, 2][(chr >= 0x10000) as usize];
+      }
+      length
+    }
+    wide_len($arg)
+  }};
+}
 
-use std::fmt::Write;
-
-/// Turns a string literal into a `&[u16]` literal.
+/// Turns a string literal into a `[u16]` literal.
 ///
 /// If you want to have a "null terminated" string (such as for some parts of
 /// Windows FFI) then you should use [`utf16_null!`](utf16_null!).
-#[proc_macro]
-pub fn utf16(stream: TokenStream) -> TokenStream {
-  const USAGE: &str = "Usage: utf16!(string_lit)";
-
-  let mut tt_iter = stream.into_iter();
-  let lit = match tt_iter.next().expect(USAGE) {
-    TokenTree::Literal(lit) => lit,
-    _ => panic!(USAGE),
-  };
-  // we expect only one string literal per invocation.
-  assert!(tt_iter.next().is_none(), USAGE);
-
-  let mut lit_string = format!("{}", lit);
-  let is_raw = lit_string.starts_with("r");
-  if is_raw {
-    lit_string.remove(0);
-  }
-
-  // right now we only support double quoted strings
-  assert!(lit_string.as_bytes().first() == Some(&b'"'), USAGE);
-  assert!(lit_string.as_bytes().last() == Some(&b'"'), USAGE);
-  let lit_str = &lit_string[1..lit_string.len() - 1];
-
-  str_to_utf16_units_tokenstream(lit_str, is_raw)
+// Inspired by code from https://github.com/CasualX/obfstr/blob/master/src/lib.rs.
+#[macro_export]
+macro_rules! utf16 {
+  ($arg:expr) => {{
+    const ARRAY_LENGTH: usize = $crate::length!($arg);
+    const RESULT: [u16; ARRAY_LENGTH] = {
+      const fn wide(s: &str) -> [u16; ARRAY_LENGTH] {
+        let s = s.as_bytes();
+        let mut data = [0u16; ARRAY_LENGTH];
+        let mut char_index: usize = 0;
+        let mut data_index: usize = 0;
+        while char_index < s.len() {
+          let mut chr = 0;
+          if s[char_index] & 0x80 == 0x00 {
+            chr = s[char_index] as u32;
+            char_index += 1;
+          } else if s[char_index] & 0xe0 == 0xc0 {
+            chr = (s[char_index] as u32 & 0x1f) << 6
+              | (s[char_index + 1] as u32 & 0x3f);
+            char_index += 2;
+          } else if s[char_index] & 0xf0 == 0xe0 {
+            chr = (s[char_index] as u32 & 0x0f) << 12
+              | (s[char_index + 1] as u32 & 0x3f) << 6
+              | (s[char_index + 2] as u32 & 0x3f);
+            char_index += 3;
+          } else if s[char_index] & 0xf8 == 0xf0 {
+            chr = (s[char_index] as u32 & 0x07) << 18
+              | (s[char_index + 1] as u32 & 0x3f) << 12
+              | (s[char_index + 2] as u32 & 0x3f) << 6
+              | (s[char_index + 3] as u32 & 0x3f);
+            char_index += 4;
+          } else {
+            ["Invalid literal provided."][($crate::always_true() as usize)];
+          };
+          if chr >= 0x10000 {
+            data[data_index] = (0xD800 + (chr - 0x10000) / 0x400) as u16;
+            data[data_index + 1] = (0xDC00 + (chr - 0x10000) % 0x400) as u16;
+            data_index += 2;
+          } else {
+            data[data_index] = chr as u16;
+            data_index += 1;
+          }
+        }
+        data
+      }
+      wide($arg)
+    };
+    RESULT
+  }};
 }
 
-/// Turns a string literal into a `&[u16]` literal with a null on the end.
+/// Turns a string literal into a `[u16]` literal with a null on the end.
 ///
 /// If you do **not** want to have a null terminator added to the string then
 /// you should use [`utf16!`](utf16!).
-#[proc_macro]
-pub fn utf16_null(stream: TokenStream) -> TokenStream {
-  const USAGE: &str = "Usage: utf16!(string_lit)";
-
-  let mut tt_iter = stream.into_iter();
-  let lit = match tt_iter.next().expect(USAGE) {
-    TokenTree::Literal(lit) => lit,
-    _ => panic!(USAGE),
-  };
-  // we expect only one string literal per invocation.
-  assert!(tt_iter.next().is_none(), USAGE);
-
-  let mut lit_string = format!("{}", lit);
-  let is_raw = lit_string.starts_with("r");
-  if is_raw {
-    lit_string.remove(0);
-  }
-
-  // right now we only support double quoted strings
-  assert!(lit_string.as_bytes().first() == Some(&b'"'), USAGE);
-  assert!(lit_string.as_bytes().last() == Some(&b'"'), USAGE);
-  // we need a null on the end, so we just reuse the end of this string.
-  lit_string.pop();
-  lit_string.push('\0');
-  let lit_str = &lit_string[1..];
-
-  str_to_utf16_units_tokenstream(lit_str, is_raw)
-}
-
-fn str_to_utf16_units_tokenstream(s: &str, is_raw: bool) -> TokenStream {
-  let mut encode_buf = [0_u16; 2];
-  let mut buf = String::with_capacity(s.as_bytes().len() * 8 + 10);
-  //
-  buf.push_str("&[");
-
-  if is_raw {
-    for c in s.chars() {
-      for unit in c.encode_utf16(&mut encode_buf) {
-        let _cant_fail = write!(buf, "{},", unit);
+#[macro_export]
+macro_rules! utf16_null {
+  ($arg:expr) => {{
+    const U16: &[u16] = &$crate::utf16!($arg);
+    const RESULT: [u16; U16.len() + 1] = {
+      let mut data = [0u16; U16.len() + 1];
+      let mut i = 0;
+      while i < data.len() - 1 {
+        data[i] = U16[i];
+        i += 1;
       }
-    }
-  } else {
-    for char_escape in CharEscapeIterator::new(s.chars()) {
-      match char_escape {
-        CharEscape::Escaped(ch) | CharEscape::Literal(ch) => {
-          for unit in ch.encode_utf16(&mut encode_buf) {
-            let _cant_fail = write!(buf, "{},", unit);
-          }
-        }
-        other => panic!("Illegal character escape sequence: {:?}", other),
-      }
-    }
-  }
-
-  buf.push_str("]");
-  //
-  TokenStream::from_str(&buf).unwrap()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CharEscape {
-  Literal(char),
-  Escaped(char),
-  Improper(char),
-  DanglingBackslash,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CharEscapeIterator<I> {
-  it: I,
-}
-
-impl<I> CharEscapeIterator<I>
-where
-  I: Iterator<Item = char>,
-{
-  fn new(it: I) -> Self {
-    Self { it }
-  }
-}
-
-impl<I> Iterator for CharEscapeIterator<I>
-where
-  I: Iterator<Item = char>,
-{
-  type Item = CharEscape;
-  fn next(&mut self) -> Option<CharEscape> {
-    if let Some(ch) = self.it.next() {
-      match ch {
-        '\\' => {
-          if let Some(follow) = self.it.next() {
-            match follow {
-              '0' => Some(CharEscape::Escaped('\0')),
-              'n' => Some(CharEscape::Escaped('\n')),
-              'r' => Some(CharEscape::Escaped('\r')),
-              't' => Some(CharEscape::Escaped('\t')),
-              '\\' => Some(CharEscape::Escaped('\\')),
-              '\'' => Some(CharEscape::Escaped('\'')),
-              '"' => Some(CharEscape::Escaped('"')),
-              'x' => {
-                let mut inner = || {
-                  let d1 = self.it.next()?;
-                  let d2 = self.it.next()?;
-                  let mut temp = [0; 4];
-                  let a =
-                    u8::from_str_radix(d1.encode_utf8(&mut temp), 16).ok()?;
-                  let b =
-                    u8::from_str_radix(d2.encode_utf8(&mut temp), 16).ok()?;
-                  let c = a << 4 | b;
-                  if c < 128 {
-                    Some(CharEscape::Escaped(c as char))
-                  } else {
-                    None
-                  }
-                };
-                inner().or(Some(CharEscape::Improper('x')))
-              }
-              'u' => {
-                let mut inner = || {
-                  let open_brace = self.it.next();
-                  if open_brace != Some('{') {
-                    return None;
-                  }
-                  let mut buffer = [0_u8; 6];
-                  let mut buffer_index = 0;
-                  loop {
-                    let next_ch = self.it.next()?;
-                    if next_ch == '}' {
-                      break;
-                    } else if buffer_index >= buffer.len() {
-                      // we have to keep eating until we see '}', so for now
-                      // just signal failure and we check after the loop.
-                      buffer_index = usize::max_value();
-                    } else {
-                      buffer[buffer_index] = next_ch as u8;
-                      buffer_index += 1;
-                    }
-                  }
-                  if buffer_index == usize::max_value() {
-                    return None;
-                  }
-                  let s = core::str::from_utf8(&buffer[..buffer_index]).ok()?;
-                  let u = u32::from_str_radix(s, 16).ok()?;
-                  core::char::from_u32(u).map(CharEscape::Escaped)
-                };
-                inner().or(Some(CharEscape::Improper('u')))
-              }
-              imp => Some(CharEscape::Improper(imp)),
-            }
-          } else {
-            Some(CharEscape::DanglingBackslash)
-          }
-        }
-        other => Some(CharEscape::Literal(other)),
-      }
-    } else {
-      None
-    }
-  }
+      data
+    };
+    RESULT
+  }};
 }
